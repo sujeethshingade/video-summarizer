@@ -17,6 +17,7 @@ import aiofiles
 import shutil
 import logging
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
@@ -436,6 +437,147 @@ async def test_openai():
             return {"status": "success", "client": "legacy", "response": response.choices[0].message.content}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# Add request/response models
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatResponse(BaseModel):
+    success: bool
+    response: str
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Chat endpoint for AI conversation"""
+    try:
+        message = request.message.strip()
+        if not message:
+            raise HTTPException(
+                status_code=400, detail="Message cannot be empty")
+
+        # Generate AI response
+        response = await generate_chat_response(message)
+
+        return ChatResponse(success=True, response=response)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat error: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Failed to generate response")
+
+
+async def generate_chat_response(message: str) -> str:
+    """Generate AI response for chat"""
+    try:
+        # Use OpenAI to generate response
+        if client:  # New OpenAI client
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant specialized in video processing, transcription, and general assistance. You are knowledgeable about video formats, audio processing, and can help with various tasks related to multimedia content analysis."},
+                    {"role": "user", "content": message}
+                ],
+                max_tokens=500,
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+        else:  # Legacy OpenAI client
+            import openai
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant specialized in video processing, transcription, and general assistance. You are knowledgeable about video formats, audio processing, and can help with various tasks related to multimedia content analysis."},
+                    {"role": "user", "content": message}
+                ],
+                max_tokens=500,
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+
+    except Exception as e:
+        logger.error(f"OpenAI API error: {str(e)}")
+        # Return fallback response
+        return generate_fallback_response(message)
+
+
+def generate_fallback_response(message: str) -> str:
+    """Generate fallback response when OpenAI is unavailable"""
+    message_lower = message.lower()
+
+    # Greeting responses
+    if any(word in message_lower for word in ['hello', 'hi', 'hey', 'greetings']):
+        return "Hello! I'm your AI assistant. I can help you with video transcription, analysis, and answer questions about your content. How can I assist you today?"
+
+    # Video-related responses
+    if any(word in message_lower for word in ['video', 'transcrib', 'upload', 'process']):
+        return "I can help you with video analysis and transcription! You can upload a video file, and I'll provide you with a comprehensive summary including both the spoken content and visual scenes. What specific aspect of video processing would you like to know more about?"
+
+    # Help responses
+    if any(word in message_lower for word in ['help', 'what can you do', 'capabilities']):
+        return "I can assist you with several tasks:\n\n• Video-to-text transcription using advanced AI models\n• Visual scene analysis and description\n• Content summarization and insights\n• General conversation and questions\n\nWould you like me to help you with any of these?"
+
+    # Technical questions
+    if any(word in message_lower for word in ['how does', 'how do you', 'explain']):
+        return "I use advanced AI models for video analysis. The process involves extracting audio for transcription using models like Whisper, and analyzing video frames using computer vision. The combination provides comprehensive insights into both audio and visual content. What specific technical aspect would you like me to explain further?"
+
+    # General responses
+    responses = [
+        "That's an interesting point! I'm here to help with video processing and analysis, but I can also discuss various topics. How can I assist you further?",
+        "I appreciate your message. While I specialize in video-to-text conversion and analysis, I'm happy to help with other questions too. What would you like to explore?",
+        "Thanks for sharing that with me. I'm designed to help with video content analysis, but I can also provide general assistance. What specific help do you need?",
+        "I understand what you're saying. My main expertise is in video transcription and analysis, but I can discuss various topics. How can I be most helpful to you?",
+        "That's a great question! I'm equipped to handle video processing tasks and provide helpful responses to various inquiries. What would you like to know more about?"
+    ]
+
+    import random
+    return random.choice(responses)
+
+
+# Audio transcription endpoint for voice messages
+
+class TranscribeResponse(BaseModel):
+    success: bool
+    text: str
+
+
+@app.post("/api/transcribe", response_model=TranscribeResponse)
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """Transcribe audio file using OpenAI Whisper"""
+    try:
+        # Validate file type
+        if not audio.filename or not any(audio.filename.lower().endswith(ext) for ext in ['.webm', '.mp3', '.wav', '.m4a', '.ogg']):
+            raise HTTPException(
+                status_code=400, detail="Unsupported audio format")
+
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_file:
+            content = await audio.read()
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
+
+        try:
+            # Transcribe audio
+            transcript = await transcribe_audio_file(tmp_file_path)
+
+            return TranscribeResponse(success=True, text=transcript)
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_file_path):
+                os.unlink(tmp_file_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Failed to transcribe audio")
+
 
 if __name__ == "__main__":
     import uvicorn

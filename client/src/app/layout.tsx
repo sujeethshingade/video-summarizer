@@ -9,7 +9,7 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "Video to Text Summarizer",
-  description: "AI-powered video summarization combining audio and visual content analysis",
+  description: "Video summarization combining audio and visual content analysis",
 };
 
 export default function RootLayout({
