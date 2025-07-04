@@ -13,6 +13,7 @@ import asyncio
 import shutil
 import logging
 import uvicorn
+import random
 
 load_dotenv()
 
@@ -392,10 +393,9 @@ async def upload_video(file: UploadFile = File(...)):
 @app.get("/")
 async def root():
     """Root endpoint"""
-    return {"message": "Video to Text Summarization API", "version": "1.0.0"}
+    return {"message": "Video to Text Summarization API", "status": "healthy"}
 
 
-# Add request/response models
 class ChatRequest(BaseModel):
     message: str
 
@@ -489,8 +489,6 @@ def generate_fallback_response(message: str) -> str:
         "I understand what you're saying. My main expertise is in video transcription and analysis, but I can discuss various topics. How can I be most helpful to you?",
         "That's a great question! I'm equipped to handle video processing tasks and provide helpful responses to various inquiries. What would you like to know more about?"
     ]
-
-    import random
     return random.choice(responses)
 
 
@@ -536,8 +534,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 
 if __name__ == "__main__":
-
-    # Check if OpenAI API key is set
     if not Config.OPENAI_API_KEY:
         print("ERROR: OPENAI_API_KEY environment variable is not set!")
         exit(1)

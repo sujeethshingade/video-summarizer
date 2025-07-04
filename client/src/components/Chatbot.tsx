@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Send, Paperclip, FileVideo, Loader2, Bot, User } from "lucide-react"
+import { Send, Paperclip, Bot, User } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Message } from "@/lib/types"
 
@@ -14,6 +14,12 @@ export function Chatbot() {
     const [message, setMessage] = useState("")
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
+
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || (
+        process.env.NODE_ENV === 'production'
+            ? process.env.NEXT_PUBLIC_API_URL
+            : 'http://localhost:8000'
+    )
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -40,7 +46,7 @@ export function Chatbot() {
             const formData = new FormData()
             formData.append('file', file)
 
-            const response = await fetch('http://localhost:8000/api/upload', {
+            const response = await fetch(`${apiUrl}/api/upload`, {
                 method: 'POST',
                 body: formData,
             })
@@ -66,7 +72,7 @@ export function Chatbot() {
         addMessage(text, true)
 
         try {
-            const response = await fetch('http://localhost:8000/api/chat', {
+            const response = await fetch(`${apiUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: text })
