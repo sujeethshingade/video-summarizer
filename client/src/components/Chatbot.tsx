@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Send, Paperclip, Bot, User } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Message } from "@/lib/types"
+import ReactMarkdown from 'react-markdown'
 
 export function Chatbot() {
     const [messages, setMessages] = useState<Message[]>([])
@@ -116,7 +117,9 @@ export function Chatbot() {
                                 )}
                                 <div className={cn("flex flex-col max-w-[80%]", isUser ? "items-end" : "items-start")}>
                                     <div className="rounded-2xl px-4 py-3 text-sm shadow-sm bg-white border border-gray-400 text-gray-900">
-                                        <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                                        <p className="whitespace-pre-wrap leading-relaxed">
+                                            <ReactMarkdown>{msg.text}</ReactMarkdown>
+                                        </p>
                                     </div>
                                 </div>
                                 {isUser && (
