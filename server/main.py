@@ -1,35 +1,26 @@
-"""
-Video to Text Summarization API
-A complete FastAPI server that processes video files to generate comprehensive summaries.
-"""
-
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+from pydantic import BaseModel
+from pathlib import Path
+from typing import List
 import os
 import tempfile
 import subprocess
 import base64
 import asyncio
-from pathlib import Path
-from typing import List, Optional
-import aiofiles
 import shutil
 import logging
-from dotenv import load_dotenv
-from pydantic import BaseModel
+import uvicorn
 
-# Load environment variables
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Configuration
 
 
 class Config:
@@ -398,45 +389,10 @@ async def upload_video(file: UploadFile = File(...)):
         processor.cleanup()
 
 
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "message": "Video to Text API is running"}
-
-
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {"message": "Video to Text Summarization API", "version": "1.0.0"}
-
-# Test API endpoints
-
-
-@app.get("/api/test")
-async def test_openai():
-    """Test OpenAI connection"""
-    try:
-        if client:
-            # Test with new client
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "user", "content": "Hello, this is a test."}],
-                max_tokens=10
-            )
-            return {"status": "success", "client": "new", "response": response.choices[0].message.content}
-        else:
-            # Test with legacy client
-            import openai
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "user", "content": "Hello, this is a test."}],
-                max_tokens=10
-            )
-            return {"status": "success", "client": "legacy", "response": response.choices[0].message.content}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 # Add request/response models
@@ -580,23 +536,10 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 
 if __name__ == "__main__":
-    import uvicorn
 
     # Check if OpenAI API key is set
     if not Config.OPENAI_API_KEY:
         print("ERROR: OPENAI_API_KEY environment variable is not set!")
-        print("Please set your OpenAI API key in the .env file")
         exit(1)
-
-    print("🚀 Starting Video to Text Summarization Server")
-    print(f"📁 Supported formats: {', '.join(Config.SUPPORTED_FORMATS)}")
-    print(f"📊 Max file size: {Config.MAX_FILE_SIZE // (1024*1024)}MB")
-    print(f"🔧 Keyframe interval: {Config.KEYFRAME_INTERVAL}s")
-    print(f"🌐 CORS origins: {Config.ALLOWED_ORIGINS}")
-    print("💡 Make sure FFmpeg is installed and accessible")
-    print("🔗 Server will be available at: http://localhost:8000")
-    print("📖 API docs will be available at: http://localhost:8000/docs")
-    print("🏥 Health check: http://localhost:8000/api/health")
-    print("🧪 Test OpenAI: http://localhost:8000/api/test")
 
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
