@@ -1,5 +1,5 @@
 {
-  "name": "video-to-text",
+  "name": "video-summarizer",
   "version": "0.1.0",
   "private": true,
   "scripts": {

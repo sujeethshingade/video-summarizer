@@ -78,6 +78,23 @@ class VideoProcessor:
                 status_code=500, detail=f"{error_msg}: {e.stderr}")
 
     async def extract_audio(self, video_path: str) -> str:
+        # First, check if the video has an audio stream
+        probe_cmd = ["ffprobe", "-v", "quiet", "-select_streams", "a",
+                     "-show_entries", "stream=index", "-of", "csv=p=0", video_path]
+
+        try:
+            result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, check=True)
+            if not result.stdout.strip():
+                logger.info(
+                    f"No audio stream found in video: {os.path.basename(video_path)}")
+                return None
+        except subprocess.CalledProcessError:
+            logger.warning(
+                f"Could not probe audio streams in video: {os.path.basename(video_path)}")
+            return None
+
+        # Proceed with audio extraction if audio stream exists
         audio_path = os.path.join(self.temp_dir, "audio.wav")
         cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec",
                "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", audio_path]
@@ -85,14 +102,42 @@ class VideoProcessor:
         return audio_path
 
     async def extract_keyframes(self, video_path: str) -> List[str]:
+        # First, check if the video has a video stream
+        probe_cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v",
+                     "-show_entries", "stream=index", "-of", "csv=p=0", video_path]
+
+        try:
+            result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, check=True)
+            if not result.stdout.strip():
+                logger.info(
+                    f"No video stream found in video: {os.path.basename(video_path)}")
+                return []
+        except subprocess.CalledProcessError:
+            logger.warning(
+                f"Could not probe video streams in video: {os.path.basename(video_path)}")
+            return []
+
         frames_dir = os.path.join(self.temp_dir, "frames")
         os.makedirs(frames_dir, exist_ok=True)
 
         cmd = ["ffmpeg", "-i", video_path, "-vf", f"fps=1/{KEYFRAME_INTERVAL}", "-q:v", "3", "-y",
                os.path.join(frames_dir, "frame_%03d.jpg")]
-        await self.run_ffmpeg_command(cmd, "Keyframe extraction failed")
 
-        return sorted([os.path.join(frames_dir, f) for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+        try:
+            await self.run_ffmpeg_command(cmd, "Keyframe extraction failed")
+        except HTTPException as e:
+            logger.warning(
+                f"Keyframe extraction failed for {os.path.basename(video_path)}: {e.detail}")
+            return []
+
+        frame_files = [f for f in os.listdir(frames_dir) if f.endswith('.jpg')]
+        if not frame_files:
+            logger.warning(
+                f"No keyframes extracted from video: {os.path.basename(video_path)}")
+            return []
+
+        return sorted([os.path.join(frames_dir, f) for f in frame_files])
 
     async def process_video(self, video_path: str, filename: str) -> tuple:
         audio_path, frame_paths = await asyncio.gather(
@@ -100,15 +145,39 @@ class VideoProcessor:
             self.extract_keyframes(video_path)
         )
 
-        transcript, visual_descriptions = await asyncio.gather(
-            transcribe_audio(audio_path),
-            self.analyze_frames(frame_paths)
-        )
+        # Handle case where there's no audio or no video
+        transcript = None
+        visual_descriptions = []
+
+        if audio_path:
+            transcript = await transcribe_audio(audio_path)
+            logger.info(f"Audio transcription completed for {filename}")
+        else:
+            logger.info(
+                f"Skipping audio transcription - no audio track found in {filename}")
+
+        if frame_paths:
+            visual_descriptions = await self.analyze_frames(frame_paths)
+            logger.info(
+                f"Visual analysis completed for {filename} - {len(frame_paths)} frames analyzed")
+        else:
+            logger.info(
+                f"Skipping visual analysis - no video frames found in {filename}")
+
+        # Ensure we have at least one type of content to analyze
+        if not transcript and not visual_descriptions:
+            raise HTTPException(
+                status_code=400,
+                detail="Video file contains neither audio nor visual content that can be processed"
+            )
 
         summary = await generate_summary(transcript, visual_descriptions, filename)
         return summary, transcript, visual_descriptions, len(frame_paths)
 
     async def analyze_frames(self, frame_paths: List[str]) -> List[str]:
+        if not frame_paths:
+            return []
+
         semaphore = asyncio.Semaphore(5)
 
         async def analyze_frame(frame_path: str, index: int):
@@ -182,21 +251,39 @@ async def analyze_images(image_path: str, timestamp: int) -> str:
 
 async def generate_summary(transcript: str, visual_descriptions: List[str], filename: str) -> str:
     try:
-        visual_content = "\n".join(visual_descriptions)
+        has_audio = transcript is not None and transcript.strip()
+        has_visual = visual_descriptions and len(visual_descriptions) > 0
 
-        prompt = f"""Analyze this video content and create a comprehensive yet concise summary.
+        audio_section = ""
+        visual_section = ""
 
-VIDEO FILE: {filename}
-
+        if has_audio:
+            audio_section = f"""
 AUDIO TRANSCRIPT:
 {transcript}
+"""
 
+        if has_visual:
+            visual_content = "\n".join(visual_descriptions)
+            visual_section = f"""
 VISUAL ANALYSIS (timestamped):
 {visual_content}
+"""
 
+        if has_audio and has_visual:
+            content_description = "video content with both audio and visual elements"
+        elif has_audio:
+            content_description = "audio content from this video file"
+        else:
+            content_description = "visual content from this video file"
+
+        prompt = f"""Analyze this {content_description} and create a comprehensive yet concise summary.
+
+VIDEO FILE: {filename}
+{audio_section}{visual_section}
 Write a detailed summary that clearly explains what happens in the video from beginning to end. The summary should be written in paragraph form using clear, professional language that flows naturally and cohesively.
 
-Cover the following aspects in your narrative:
+Cover the following aspects in your narrative (only include sections that are relevant based on available content):
 - What the video is about and who is involved
 - The main topics, discussions, or demonstrations presented
 - Key visual elements, scenes, or actions shown throughout
@@ -209,6 +296,8 @@ Requirements:
 - Be specific and factual; avoid vague or generic descriptions
 - Describe visual elements such as charts, graphics, demonstrations, or locations when relevant
 - Keep the summary between 300 to 400 words
+- If only audio is available, focus on the spoken content, topics discussed, and key insights
+- If only visual content is available, focus on what is shown, demonstrated, or displayed
 - Omit any of the above elements if they are not present in the video
 
 Focus on telling the story of the video in a way that is informative, accurate, and easy to understand for someone who has not seen it."""
@@ -216,7 +305,7 @@ Focus on telling the story of the video in a way that is informative, accurate, 
         messages = [
             {
                 "role": "system",
-                "content": "You are an expert video content analyst specializing in creating executive-level summaries. Your summaries help busy professionals quickly understand video content without watching. Focus on actionable insights, key data points, and business value. Be precise, structured, and eliminate fluff."
+                "content": "You are an expert video content analyst specializing in creating executive-level summaries. Your summaries help busy professionals quickly understand video content without watching. Focus on actionable insights, key data points, and business value. Be precise, structured, and eliminate fluff. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content."
             },
             {"role": "user", "content": prompt}
         ]
@@ -270,16 +359,21 @@ async def upload_video(file: UploadFile = File(...)):
 
         logger.info(f"Successfully processed video: {file.filename}")
 
-        return JSONResponse(content={
+        response_data = {
             "success": True,
             "summary": summary,
             "metadata": {
                 "filename": file.filename,
-                "transcript_length": len(transcript),
+                "transcript_length": len(transcript) if transcript else 0,
+                "has_audio": transcript is not None,
+                "has_visual": frames_count > 0,
                 "frames_analyzed": frames_count,
                 "keyframe_interval": KEYFRAME_INTERVAL
             }
-        })
+        }
+
+        logger.info(f"Response data: {response_data}")
+        return JSONResponse(content=response_data)
 
     except HTTPException:
         raise

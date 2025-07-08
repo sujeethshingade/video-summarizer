@@ -151,10 +151,12 @@ Requirements: 300-400 words, professional language, specific and factual."""
 ### Configurable Options
 
 - **Max file size**: 100MB (adjustable via MAX_FILE_SIZE)
-- **Supported formats**: MP4, MOV, AVI, MKV, WMV, FLV, WebM
+- **Supported formats**: MP4, MOV, AVI, WMV, FLV, WebM, MKV
 - **Keyframe extraction**: Every 5 seconds (configurable)
-- **Frame analysis limit**: 50 frames maximum (prevents excessive API usage)
 - **Summary length**: 300-400 words (optimized for readability)
+- **Audio handling**: Automatically detects and handles videos without audio tracks
+- **Visual handling**: Automatically detects and handles videos without visual content
+- **Content requirements**: Processes videos with audio-only, visual-only, or combined content
 
 ### References
 
