@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Send, Paperclip, Bot, User } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Message } from "@/lib/types"
-import ReactMarkdown from 'react-markdown'
+import { Summary } from "./Summary"
 
 export function Chatbot() {
     const [messages, setMessages] = useState<Message[]>([])
@@ -26,13 +26,14 @@ export function Chatbot() {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
     }, [messages])
 
-    const addMessage = (text: string, isUser: boolean, filename?: string, isProcessing?: boolean) => {
+    const addMessage = (text: string, isUser: boolean, filename?: string, isProcessing?: boolean, isVideoSummary?: boolean) => {
         setMessages(prev => [...prev, {
             id: `${Date.now()}-${isUser}`,
             text,
             isUser,
             filename,
-            isProcessing
+            isProcessing,
+            isVideoSummary
         }])
     }
 
@@ -57,7 +58,7 @@ export function Chatbot() {
             setMessages(prev => prev.filter(msg => !msg.isProcessing))
 
             if (response.ok && data.summary) {
-                addMessage(data.summary, false)
+                addMessage(data.summary, false, undefined, false, true)
             } else {
                 addMessage('Error processing video. Please try again.', false)
             }
@@ -103,7 +104,7 @@ export function Chatbot() {
     return (
         <div className="flex flex-col h-full bg-gray-200">
             <div className="flex-1 overflow-y-auto">
-                <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+                <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
                     {messages.map((msg) => {
                         const isUser = msg.isUser;
                         return (
@@ -117,8 +118,12 @@ export function Chatbot() {
                                 )}
                                 <div className={cn("flex flex-col max-w-[80%]", isUser ? "items-end" : "items-start")}>
                                     <div className="rounded-2xl px-4 py-3 text-sm shadow-sm bg-white border border-gray-400 text-gray-900">
-                                        <div className="whitespace-pre-wrap leading-relaxed prose prose-sm max-w-none [&>*]:my-1 [&>p]:my-1 [&>ul]:my-1 [&>ol]:my-1 [&>li]:my-0">
-                                            <ReactMarkdown>{msg.text}</ReactMarkdown>
+                                        <div className="leading-relaxed">
+                                            {msg.isVideoSummary ? (
+                                                <Summary content={msg.text} />
+                                            ) : (
+                                                <div className="whitespace-pre-wrap">{msg.text}</div>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -137,7 +142,7 @@ export function Chatbot() {
             </div>
 
             <div className="flex-shrink-0 bg-gray-200 border-t border-gray-400">
-                <div className="max-w-5xl mx-auto px-4 py-3">
+                <div className="max-w-6xl mx-auto px-4 py-3">
                     <div className="flex items-center gap-2">
                         <Input
                             value={message}

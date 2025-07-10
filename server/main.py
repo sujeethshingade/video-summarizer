@@ -14,6 +14,7 @@ import asyncio
 import shutil
 import logging
 import uvicorn
+import json
 
 load_dotenv()
 
@@ -290,27 +291,44 @@ VISUAL ANALYSIS (timestamped):
 VIDEO FILE: {filename}
 {audio_section}{visual_section}
 
-Provide output in the following format:
+Provide output in valid JSON format with the following structure:
+{{
+  "summary": "Brief summary of the work session within 5 lines",
+  "tasks": [
+    {{
+      "task": "Description of the task",
+      "category": "One of: Repetitive, Analytical, Communication, Decision-Making, Knowledge Work",
+      "tools": ["e.g. \"Tool1\", \"Tool2\""],
+      "timeEstimate": "Only if available or Unknown",
+      "aiOpportunity": "High, Medium, or Low"
+    }}
+  ]
+}}
 
-Summary:
-- [Short summary within 5 lines]
-
-Tasks:
-1. Task: [Describe the task]
-   - Category: [e.g., Repetitive]
-   - Tool(s): [e.g., Excel, Salesforce]
-   - Time Estimate: [only if available or "Unknown"]
-   - AI Opportunity: [High/Medium/Low]"""
+Return only valid JSON, no additional text or formatting."""
 
         messages = [
             {
                 "role": "system",
-                "content": "You are an expert video content analyst specializing in creating executive-level summaries. Your summaries help busy professionals quickly understand video content without watching. Focus on actionable insights, key data points, and business value. Be precise, structured, and eliminate fluff. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content."
+                "content": "You are an AI assistant analyzing employee work session transcripts. Your summaries help busy professionals quickly understand video content without watching. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content. Always return valid JSON format as requested."
             },
             {"role": "user", "content": prompt}
         ]
 
-        return await call_openai_api("gpt-4.1", messages, max_tokens=800, temperature=0.2)
+        response_text = await call_openai_api("gpt-4.1", messages, max_tokens=800, temperature=0.2)
+
+        try:
+            json.loads(response_text)
+            return response_text
+        except json.JSONDecodeError:
+            logger.warning(
+                "OpenAI response was not valid JSON, creating fallback structure")
+            fallback_response = {
+                "summary": response_text,
+                "tasks": []
+            }
+            return json.dumps(fallback_response, indent=2)
+
     except Exception as e:
         logger.error(f"Error generating summary: {str(e)}")
         raise HTTPException(
