@@ -117,9 +117,9 @@ export function Chatbot() {
                                 )}
                                 <div className={cn("flex flex-col max-w-[80%]", isUser ? "items-end" : "items-start")}>
                                     <div className="rounded-2xl px-4 py-3 text-sm shadow-sm bg-white border border-gray-400 text-gray-900">
-                                        <p className="whitespace-pre-wrap leading-relaxed">
+                                        <div className="whitespace-pre-wrap leading-relaxed prose prose-sm max-w-none [&>*]:my-1 [&>p]:my-1 [&>ul]:my-1 [&>ol]:my-1 [&>li]:my-0">
                                             <ReactMarkdown>{msg.text}</ReactMarkdown>
-                                        </p>
+                                        </div>
                                     </div>
                                 </div>
                                 {isUser && (

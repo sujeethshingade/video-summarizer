@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from pathlib import Path
 from typing import List
+from openai import OpenAI
 import os
 import tempfile
 import subprocess
@@ -33,7 +34,6 @@ KEYFRAME_INTERVAL = 5  # seconds
 app = FastAPI(title="Video to Text Summarization", version="1.0.0")
 
 try:
-    from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
     logger.info("OpenAI client initialized successfully")
 except Exception as e:
@@ -262,14 +262,12 @@ async def generate_summary(transcript: str, visual_descriptions: List[str], file
 AUDIO TRANSCRIPT:
 {transcript}
 """
-
         if has_visual:
             visual_content = "\n".join(visual_descriptions)
             visual_section = f"""
 VISUAL ANALYSIS (timestamped):
 {visual_content}
 """
-
         if has_audio and has_visual:
             content_description = "video content with both audio and visual elements"
         elif has_audio:
@@ -277,30 +275,32 @@ VISUAL ANALYSIS (timestamped):
         else:
             content_description = "visual content from this video file"
 
-        prompt = f"""Analyze this {content_description} and create a comprehensive yet concise summary.
+        prompt = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
+1. Summarize the key tasks the employee performed.
+2. Categorize each task into one of the following: 
+   - Repetitive
+   - Analytical
+   - Communication
+   - Decision-Making
+   - Knowledge Work
+3. Identify tools and systems used.
+4. Estimate time spent (only if mentioned or inferred).
+5. Suggest whether the task has High, Medium, or Low potential for AI support.
 
 VIDEO FILE: {filename}
 {audio_section}{visual_section}
-Write a detailed summary that clearly explains what happens in the video from beginning to end. The summary should be written in paragraph form using clear, professional language that flows naturally and cohesively.
 
-Cover the following aspects in your narrative (only include sections that are relevant based on available content):
-- What the video is about and who is involved
-- The main topics, discussions, or demonstrations presented
-- Key visual elements, scenes, or actions shown throughout
-- Important conclusions, data, or insights shared
-- The overall purpose and value of the content
+Provide output in the following format:
 
-Requirements:
-- Use complete sentences that flow smoothly from one idea to the next
-- Highlight the most important and unique moments in the video
-- Be specific and factual; avoid vague or generic descriptions
-- Describe visual elements such as charts, graphics, demonstrations, or locations when relevant
-- Keep the summary between 300 to 400 words
-- If only audio is available, focus on the spoken content, topics discussed, and key insights
-- If only visual content is available, focus on what is shown, demonstrated, or displayed
-- Omit any of the above elements if they are not present in the video
+Summary:
+- [Short summary within 5 lines]
 
-Focus on telling the story of the video in a way that is informative, accurate, and easy to understand for someone who has not seen it."""
+Tasks:
+1. Task: [Describe the task]
+   - Category: [e.g., Repetitive]
+   - Tool(s): [e.g., Excel, Salesforce]
+   - Time Estimate: [only if available or "Unknown"]
+   - AI Opportunity: [High/Medium/Low]"""
 
         messages = [
             {
