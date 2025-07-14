@@ -68,6 +68,19 @@ class VideoProcessor:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp()
 
+    async def get_video_duration(self, video_path: str) -> float:
+        try:
+            cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                   "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True)
+            duration = float(result.stdout.strip())
+            return duration
+        except (subprocess.CalledProcessError, ValueError) as e:
+            logger.warning(
+                f"Could not get video duration for {os.path.basename(video_path)}: {e}")
+            return 0.0
+
     async def run_ffmpeg_command(self, cmd: List[str], error_msg: str):
         try:
             result = subprocess.run(
@@ -141,6 +154,9 @@ class VideoProcessor:
         return sorted([os.path.join(frames_dir, f) for f in frame_files])
 
     async def process_video(self, video_path: str, filename: str) -> tuple:
+        # Get video duration first
+        video_duration = await self.get_video_duration(video_path)
+
         audio_path, frame_paths = await asyncio.gather(
             self.extract_audio(video_path),
             self.extract_keyframes(video_path)
@@ -172,7 +188,7 @@ class VideoProcessor:
                 detail="Video file contains neither audio nor visual content that can be processed"
             )
 
-        summary = await generate_summary(transcript, visual_descriptions, filename)
+        summary = await generate_summary(transcript, visual_descriptions, filename, video_duration)
         return summary, transcript, visual_descriptions, len(frame_paths)
 
     async def analyze_frames(self, frame_paths: List[str]) -> List[str]:
@@ -184,7 +200,11 @@ class VideoProcessor:
         async def analyze_frame(frame_path: str, index: int):
             async with semaphore:
                 timestamp = index * KEYFRAME_INTERVAL
-                return await analyze_images(frame_path, timestamp)
+                # Format timestamp as minutes:seconds for better readability
+                minutes = timestamp // 60
+                seconds = timestamp % 60
+                timestamp_str = f"{int(minutes):02d}:{int(seconds):02d}"
+                return await analyze_images(frame_path, timestamp, timestamp_str)
 
         tasks = [analyze_frame(frame_path, i)
                  for i, frame_path in enumerate(frame_paths)]
@@ -225,17 +245,22 @@ async def transcribe_audio(audio_path: str) -> str:
             status_code=500, detail=f"Audio transcription failed: {str(e)}")
 
 
-async def analyze_images(image_path: str, timestamp: int) -> str:
+async def analyze_images(image_path: str, timestamp: int, timestamp_str: str = None) -> str:
     try:
         with open(image_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+
+        if timestamp_str is None:
+            minutes = timestamp // 60
+            seconds = timestamp % 60
+            timestamp_str = f"{int(minutes):02d}:{int(seconds):02d}"
 
         messages = [{
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": f"Analyze this video frame at {timestamp}s. Describe: 1) Main subjects/people and their actions, 2) Key objects and environment, 3) Text/graphics visible, 4) Overall scene context. Be specific and concise."
+                    "text": f"Analyze this video frame at {timestamp_str} ({timestamp}s). Describe: 1) Main subjects/people and their actions, 2) Key objects and environment, 3) Text/graphics visible, 4) Overall scene context. Be specific and concise about what tasks or activities are being performed."
                 },
                 {
                     "type": "image_url",
@@ -244,13 +269,14 @@ async def analyze_images(image_path: str, timestamp: int) -> str:
             ]
         }]
 
-        return await call_openai_api("gpt-4.1", messages, max_tokens=200)
+        result = await call_openai_api("gpt-4.1", messages, max_tokens=200)
+        return f"[{timestamp_str}]: {result}"
     except Exception as e:
-        logger.error(f"Error analyzing frame at {timestamp}s: {str(e)}")
-        return f"[{timestamp}s]: Analysis failed"
+        logger.error(f"Error analyzing frame at {timestamp_str}: {str(e)}")
+        return f"[{timestamp_str}]: Analysis failed"
 
 
-async def generate_summary(transcript: str, visual_descriptions: List[str], filename: str) -> str:
+async def generate_summary(transcript: str, visual_descriptions: List[str], filename: str, video_duration: float = 0.0) -> str:
     try:
         has_audio = transcript is not None and transcript.strip()
         has_visual = visual_descriptions and len(visual_descriptions) > 0
@@ -276,6 +302,11 @@ VISUAL ANALYSIS (timestamped):
         else:
             content_description = "visual content from this video file"
 
+        # Format video duration for display
+        duration_minutes = int(video_duration // 60)
+        duration_seconds = int(video_duration % 60)
+        duration_str = f"{duration_minutes}m {duration_seconds}s" if duration_minutes > 0 else f"{duration_seconds}s"
+
         prompt = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
 1. Summarize the key tasks the employee performed.
 2. Categorize each task into one of the following: 
@@ -285,21 +316,27 @@ VISUAL ANALYSIS (timestamped):
    - Decision-Making
    - Knowledge Work
 3. Identify tools and systems used.
-4. Estimate time spent (only if mentioned or inferred).
+4. Estimate time spent for each task based on the video duration and content analysis.
 5. Suggest whether the task has High, Medium, or Low potential for AI support.
 
 VIDEO FILE: {filename}
+VIDEO DURATION: {duration_str} (total duration)
 {audio_section}{visual_section}
+
+IMPORTANT: When estimating time for tasks, consider that:
+- The total video duration is {duration_str}
+- Multiple tasks can occur simultaneously or sequentially within this timeframe
+- Individual task durations should be realistic relative to the total video length
 
 Provide output in valid JSON format with the following structure:
 {{
-  "summary": "Brief summary of the work session within 5 lines",
+  "summary": "Brief detailed summary of the work session within 5 lines.",
   "tasks": [
     {{
       "task": "Description of the task",
       "category": "One of: Repetitive, Analytical, Communication, Decision-Making, Knowledge Work",
-      "tools": ["e.g. \"Tool1\", \"Tool2\""],
-      "timeEstimate": "Only if available or Unknown",
+      "tools": ["e.g. \"Tool1\", \"Tool2\", \"Tool3\""],
+      "timeEstimate": "Estimated duration (e.g., '15s', '30s', '45s') based on video analysis or 'Unknown' if not applicable",
       "aiOpportunity": "High, Medium, or Low"
     }}
   ]
@@ -310,7 +347,7 @@ Return only valid JSON, no additional text or formatting."""
         messages = [
             {
                 "role": "system",
-                "content": "You are an AI assistant analyzing employee work session transcripts. Your summaries help busy professionals quickly understand video content without watching. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content. Always return valid JSON format as requested."
+                "content": "You are an AI assistant analyzing employee work session transcripts. Your summaries help busy professionals quickly understand video content without watching. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content. Always return valid JSON format as requested. When estimating task durations, be realistic based on the total video duration and the context of the tasks observed. Use timestamps from visual analysis and audio cues to determine how long each task actually took."
             },
             {"role": "user", "content": prompt}
         ]
@@ -325,7 +362,13 @@ Return only valid JSON, no additional text or formatting."""
                 "OpenAI response was not valid JSON, creating fallback structure")
             fallback_response = {
                 "summary": response_text,
-                "tasks": []
+                "tasks": [{
+                    "task": "Unable to parse specific tasks from response",
+                    "category": "Knowledge Work",
+                    "tools": ["Unknown"],
+                    "timeEstimate": duration_str if video_duration > 0 else "Unknown",
+                    "aiOpportunity": "Medium"
+                }]
             }
             return json.dumps(fallback_response, indent=2)
 
