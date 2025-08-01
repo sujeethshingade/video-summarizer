@@ -36,7 +36,7 @@ MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME")
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
 SUPPORTED_FORMATS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
 KEYFRAME_INTERVAL = 5  # seconds
 

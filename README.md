@@ -1,4 +1,4 @@
-# Video to Text Summarization
+# Video Summarization
 
 An application that processes video files to analyze employee work sessions, providing structured summaries with task categorization, time estimation, and AI automation opportunity assessment.
 
@@ -153,7 +153,7 @@ Provide output in valid JSON format with the following structure:
 
 ### Configurable Options
 
-- **Max file size**: 100MB (adjustable via MAX_FILE_SIZE)
+- **Max file size**: 1GB (adjustable via MAX_FILE_SIZE)
 - **Supported formats**: MP4, MOV, AVI, WMV, FLV, WebM, MKV
 - **Keyframe extraction**: Every 5 seconds (configurable via KEYFRAME_INTERVAL)
 - **Output format**: Structured JSON with fallback to plain text
