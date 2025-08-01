@@ -23,3 +23,18 @@ export interface SummaryData {
 export interface SummaryDisplayProps {
     content: string
 }
+
+export interface SummaryDocument {
+    _id: string
+    filename: string
+    summary_data: SummaryData
+    processed_at: string
+    metadata?: {
+        filename?: string
+        transcript_length?: number
+        has_audio?: boolean
+        has_visual?: boolean
+        frames_analyzed?: number
+        keyframe_interval?: number
+    }
+}

@@ -4,8 +4,10 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from openai import OpenAI
+from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime
 import os
 import tempfile
 import subprocess
@@ -26,6 +28,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is required")
 
+MONGODB_URL = os.getenv("MONGODB_URL")
+if not MONGODB_URL:
+    raise ValueError("MONGODB_URL environment variable is required")
+
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME")
+
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
@@ -33,6 +41,10 @@ SUPPORTED_FORMATS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
 KEYFRAME_INTERVAL = 5  # seconds
 
 app = FastAPI(title="Video to Text Summarization", version="1.0.0")
+
+mongodb_client = AsyncIOMotorClient(MONGODB_URL)
+db = mongodb_client[MONGODB_DB_NAME]
+summaries_collection = db.summaries
 
 try:
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -62,6 +74,49 @@ class ChatResponse(BaseModel):
 class TranscribeResponse(BaseModel):
     success: bool
     text: str
+
+
+class SummaryDocument(BaseModel):
+    filename: str
+    summary_data: dict
+    processed_at: datetime
+    metadata: Optional[dict] = None
+
+
+async def save_summary_to_db(filename: str, summary_json: str, metadata: dict = None) -> str:
+    try:
+        summary_data = json.loads(summary_json)
+        
+        # Create the document
+        document = {
+            "filename": filename,
+            "summary_data": summary_data,
+            "processed_at": datetime.utcnow(),
+            "metadata": metadata or {}
+        }
+        
+        # Insert into MongoDB
+        result = await summaries_collection.insert_one(document)
+        logger.info(f"Saved summary to database with ID: {result.inserted_id}")
+        return str(result.inserted_id)
+        
+    except Exception as e:
+        logger.error(f"Error saving summary to database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database save failed: {str(e)}")
+
+
+async def get_all_summaries() -> List[dict]:
+    try:
+        cursor = summaries_collection.find().sort("processed_at", -1)
+        summaries = []
+        async for document in cursor:
+            # Convert ObjectId to string for JSON serialization
+            document["_id"] = str(document["_id"])
+            summaries.append(document)
+        return summaries
+    except Exception as e:
+        logger.error(f"Error retrieving summaries from database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database retrieval failed: {str(e)}")
 
 
 class VideoProcessor:
@@ -269,7 +324,7 @@ async def analyze_images(image_path: str, timestamp: int, timestamp_str: str = N
             ]
         }]
 
-        result = await call_openai_api("gpt-4.1", messages, max_tokens=200)
+        result = await call_openai_api("gpt-4.1-mini", messages, max_tokens=800)
         return f"[{timestamp_str}]: {result}"
     except Exception as e:
         logger.error(f"Error analyzing frame at {timestamp_str}: {str(e)}")
@@ -352,7 +407,7 @@ Return only valid JSON, no additional text or formatting."""
             {"role": "user", "content": prompt}
         ]
 
-        response_text = await call_openai_api("gpt-4.1", messages, max_tokens=800, temperature=0.2)
+        response_text = await call_openai_api("gpt-4.1-mini", messages, max_tokens=800, temperature=0.2)
 
         try:
             json.loads(response_text)
@@ -394,6 +449,18 @@ async def root():
     return {"message": "Video to Text Summarization", "status": "healthy"}
 
 
+@app.get("/api/summaries")
+async def get_summaries():
+    try:
+        summaries = await get_all_summaries()
+        return {"success": True, "summaries": summaries}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_summaries endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve summaries")
+
+
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     if not file.filename:
@@ -420,17 +487,24 @@ async def upload_video(file: UploadFile = File(...)):
 
         logger.info(f"Successfully processed video: {file.filename}")
 
+        # Prepare metadata for database
+        metadata = {
+            "filename": file.filename,
+            "transcript_length": len(transcript) if transcript else 0,
+            "has_audio": transcript is not None,
+            "has_visual": frames_count > 0,
+            "frames_analyzed": frames_count,
+            "keyframe_interval": KEYFRAME_INTERVAL
+        }
+
+        # Save to MongoDB
+        document_id = await save_summary_to_db(file.filename, summary, metadata)
+
         response_data = {
             "success": True,
             "summary": summary,
-            "metadata": {
-                "filename": file.filename,
-                "transcript_length": len(transcript) if transcript else 0,
-                "has_audio": transcript is not None,
-                "has_visual": frames_count > 0,
-                "frames_analyzed": frames_count,
-                "keyframe_interval": KEYFRAME_INTERVAL
-            }
+            "document_id": document_id,
+            "metadata": metadata
         }
 
         logger.info(f"Response data: {response_data}")

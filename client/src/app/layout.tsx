@@ -8,7 +8,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Video to Text Summarizer",
+  title: "Video Summarizer",
   description: "Video summarization combining audio and visual content analysis",
 };
 
