@@ -36,6 +36,9 @@ pip install -r requirements.txt
 # Set up environment variables
 cp .env.example .env
 
+# Merge WebM videos based on timestamps
+python merge_webm.py
+
 # Start backend server
 python main.py
 
