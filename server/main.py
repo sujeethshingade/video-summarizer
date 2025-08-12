@@ -38,7 +38,7 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
 SUPPORTED_FORMATS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
-KEYFRAME_INTERVAL = 5  # seconds
+KEYFRAME_INTERVAL = 30  # seconds
 
 app = FastAPI(title="Video to Text Summarization", version="1.0.0")
 
@@ -250,7 +250,7 @@ class VideoProcessor:
         if not frame_paths:
             return []
 
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(60)
 
         async def analyze_frame(frame_path: str, index: int):
             async with semaphore:
