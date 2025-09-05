@@ -1,13 +1,13 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from openai import OpenAI
 from motor.motor_asyncio import AsyncIOMotorClient
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import tempfile
 import subprocess
@@ -24,6 +24,8 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+START_TIME = datetime.now(timezone.utc)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is required")
@@ -38,7 +40,8 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
 SUPPORTED_FORMATS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
-KEYFRAME_INTERVAL = 30  # seconds
+# Default keyframe interval (used as fallback)
+DEFAULT_KEYFRAME_INTERVAL = 30  # seconds
 
 app = FastAPI(title="Video to Text Summarization", version="1.0.0")
 
@@ -62,15 +65,6 @@ app.add_middleware(
 )
 
 
-class ChatRequest(BaseModel):
-    message: str
-
-
-class ChatResponse(BaseModel):
-    success: bool
-    response: str
-
-
 class TranscribeResponse(BaseModel):
     success: bool
     text: str
@@ -83,7 +77,7 @@ class SummaryDocument(BaseModel):
     metadata: Optional[dict] = None
 
 
-async def save_summary_to_db(filename: str, summary_json: str, metadata: dict = None) -> str:
+async def save_summary_to_db(filename: str, summary_json: str, prompt_used: str, metadata: dict = None) -> str:
     try:
         summary_data = json.loads(summary_json)
         
@@ -91,7 +85,8 @@ async def save_summary_to_db(filename: str, summary_json: str, metadata: dict = 
         document = {
             "filename": filename,
             "summary_data": summary_data,
-            "processed_at": datetime.utcnow(),
+            "prompt_used": prompt_used,
+            "processed_at": datetime.now(timezone.utc),
             "metadata": metadata or {}
         }
         
@@ -170,7 +165,7 @@ class VideoProcessor:
         await self.run_ffmpeg_command(cmd, "Audio extraction failed")
         return audio_path
 
-    async def extract_keyframes(self, video_path: str) -> List[str]:
+    async def extract_keyframes(self, video_path: str, keyframe_interval: int) -> List[str]:
         # First, check if the video has a video stream
         probe_cmd = ["ffprobe", "-v", "quiet", "-select_streams", "v",
                      "-show_entries", "stream=index", "-of", "csv=p=0", video_path]
@@ -190,8 +185,12 @@ class VideoProcessor:
         frames_dir = os.path.join(self.temp_dir, "frames")
         os.makedirs(frames_dir, exist_ok=True)
 
-        cmd = ["ffmpeg", "-i", video_path, "-vf", f"fps=1/{KEYFRAME_INTERVAL}", "-q:v", "3", "-y",
-               os.path.join(frames_dir, "frame_%03d.jpg")]
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-vf", f"fps=1/{keyframe_interval}",
+            "-q:v", "3", "-y",
+            os.path.join(frames_dir, "frame_%03d.jpg")
+        ]
 
         try:
             await self.run_ffmpeg_command(cmd, "Keyframe extraction failed")
@@ -208,13 +207,16 @@ class VideoProcessor:
 
         return sorted([os.path.join(frames_dir, f) for f in frame_files])
 
-    async def process_video(self, video_path: str, filename: str) -> tuple:
+    async def process_video(self, video_path: str, filename: str, custom_prompt: Optional[str] = None) -> Tuple[str, Optional[str], List[str], int, float, int, str]:
         # Get video duration first
         video_duration = await self.get_video_duration(video_path)
 
+        # Choose dynamic keyframe interval based on duration
+        keyframe_interval = choose_keyframe_interval(video_duration)
+
         audio_path, frame_paths = await asyncio.gather(
             self.extract_audio(video_path),
-            self.extract_keyframes(video_path)
+            self.extract_keyframes(video_path, keyframe_interval)
         )
 
         # Handle case where there's no audio or no video
@@ -229,7 +231,7 @@ class VideoProcessor:
                 f"Skipping audio transcription - no audio track found in {filename}")
 
         if frame_paths:
-            visual_descriptions = await self.analyze_frames(frame_paths)
+            visual_descriptions = await self.analyze_frames(frame_paths, keyframe_interval)
             logger.info(
                 f"Visual analysis completed for {filename} - {len(frame_paths)} frames analyzed")
         else:
@@ -243,10 +245,12 @@ class VideoProcessor:
                 detail="Video file contains neither audio nor visual content that can be processed"
             )
 
-        summary = await generate_summary(transcript, visual_descriptions, filename, video_duration)
-        return summary, transcript, visual_descriptions, len(frame_paths)
+        summary, prompt_used = await generate_summary(
+            transcript, visual_descriptions, filename, video_duration, custom_prompt
+        )
+        return summary, transcript, visual_descriptions, len(frame_paths), video_duration, keyframe_interval, prompt_used
 
-    async def analyze_frames(self, frame_paths: List[str]) -> List[str]:
+    async def analyze_frames(self, frame_paths: List[str], keyframe_interval: int = DEFAULT_KEYFRAME_INTERVAL) -> List[str]:
         if not frame_paths:
             return []
 
@@ -254,19 +258,23 @@ class VideoProcessor:
 
         async def analyze_frame(frame_path: str, index: int):
             async with semaphore:
-                timestamp = index * KEYFRAME_INTERVAL
+                timestamp = index * keyframe_interval
                 # Format timestamp as minutes:seconds for better readability
                 minutes = timestamp // 60
                 seconds = timestamp % 60
                 timestamp_str = f"{int(minutes):02d}:{int(seconds):02d}"
                 return await analyze_images(frame_path, timestamp, timestamp_str)
 
-        tasks = [analyze_frame(frame_path, i)
-                 for i, frame_path in enumerate(frame_paths)]
+        tasks = [analyze_frame(fp, i) for i, fp in enumerate(frame_paths)]
         descriptions = await asyncio.gather(*tasks, return_exceptions=True)
 
-        return [desc if isinstance(desc, str) else f"[{i*KEYFRAME_INTERVAL}s]: Analysis failed"
-                for i, desc in enumerate(descriptions)]
+        normalized = []
+        for i, desc in enumerate(descriptions):
+            if isinstance(desc, str):
+                normalized.append(desc)
+            else:
+                normalized.append(f"[{i*keyframe_interval}s]: Analysis failed")
+        return normalized
 
     def cleanup(self):
         try:
@@ -275,10 +283,10 @@ class VideoProcessor:
             logger.error(f"Error cleaning up temp files: {str(e)}")
 
 
-async def call_openai_api(model: str, messages: list, max_tokens: int = 500, temperature: float = 0.3) -> str:
+async def call_openai_api(model: str, messages: list) -> str:
     try:
         response = client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=temperature
+            model=model, messages=messages
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -324,17 +332,23 @@ async def analyze_images(image_path: str, timestamp: int, timestamp_str: str = N
             ]
         }]
 
-        result = await call_openai_api("gpt-4.1-mini", messages, max_tokens=800)
+        result = await call_openai_api("gpt-5-mini", messages)
         return f"[{timestamp_str}]: {result}"
     except Exception as e:
         logger.error(f"Error analyzing frame at {timestamp_str}: {str(e)}")
         return f"[{timestamp_str}]: Analysis failed"
 
 
-async def generate_summary(transcript: str, visual_descriptions: List[str], filename: str, video_duration: float = 0.0) -> str:
+async def generate_summary(
+    transcript: str,
+    visual_descriptions: List[str],
+    filename: str,
+    video_duration: float = 0.0,
+    custom_prompt: Optional[str] = None
+) -> Tuple[str, str]:
     try:
-        has_audio = transcript is not None and transcript.strip()
-        has_visual = visual_descriptions and len(visual_descriptions) > 0
+        has_audio = transcript is not None and str(transcript).strip()
+        has_visual = bool(visual_descriptions)
 
         audio_section = ""
         visual_section = ""
@@ -350,19 +364,17 @@ AUDIO TRANSCRIPT:
 VISUAL ANALYSIS (timestamped):
 {visual_content}
 """
-        if has_audio and has_visual:
-            content_description = "video content with both audio and visual elements"
-        elif has_audio:
-            content_description = "audio content from this video file"
-        else:
-            content_description = "visual content from this video file"
 
-        # Format video duration for display
+        content_description = (
+            "video content with both audio and visual elements" if (has_audio and has_visual)
+            else ("audio content from this video file" if has_audio else "visual content from this video file")
+        )
+
         duration_minutes = int(video_duration // 60)
         duration_seconds = int(video_duration % 60)
         duration_str = f"{duration_minutes}m {duration_seconds}s" if duration_minutes > 0 else f"{duration_seconds}s"
 
-        prompt = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
+        default_instruction = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
 1. Summarize the key tasks the employee performed.
 2. Categorize each task into one of the following: 
    - Repetitive
@@ -399,22 +411,29 @@ Provide output in valid JSON format with the following structure:
 
 Return only valid JSON, no additional text or formatting."""
 
+        user_prompt_display = custom_prompt.strip() if (custom_prompt and custom_prompt.strip()) else default_instruction
+        composed_prompt_for_model = (
+            (custom_prompt.strip() if custom_prompt else "")
+            + f"\n\nVIDEO FILE: {filename}\nVIDEO DURATION: {duration_str} (total duration)\n"
+            + audio_section
+            + visual_section
+        ) if (custom_prompt and custom_prompt.strip()) else default_instruction
+
         messages = [
             {
                 "role": "system",
                 "content": "You are an AI assistant analyzing employee work session transcripts. Your summaries help busy professionals quickly understand video content without watching. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content. Always return valid JSON format as requested. When estimating task durations, be realistic based on the total video duration and the context of the tasks observed. Use timestamps from visual analysis and audio cues to determine how long each task actually took."
             },
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": composed_prompt_for_model}
         ]
 
-        response_text = await call_openai_api("gpt-4.1-mini", messages, max_tokens=800, temperature=0.2)
+        response_text = await call_openai_api("gpt-5-mini", messages)
 
         try:
             json.loads(response_text)
-            return response_text
+            return response_text, user_prompt_display
         except json.JSONDecodeError:
-            logger.warning(
-                "OpenAI response was not valid JSON, creating fallback structure")
+            logger.warning("OpenAI response was not valid JSON, creating fallback structure")
             fallback_response = {
                 "summary": response_text,
                 "tasks": [{
@@ -425,28 +444,63 @@ Return only valid JSON, no additional text or formatting."""
                     "aiOpportunity": "Medium"
                 }]
             }
-            return json.dumps(fallback_response, indent=2)
-
+            return json.dumps(fallback_response, indent=2), user_prompt_display
     except Exception as e:
         logger.error(f"Error generating summary: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Summary generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
 
 
-async def generate_chat_response(message: str) -> str:
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful AI assistant. Provide detailed, clear and informative responses."
-        },
-        {"role": "user", "content": message}
-    ]
-    return await call_openai_api("gpt-4.1-mini", messages, max_tokens=500, temperature=0.7)
+def choose_keyframe_interval(video_duration: float) -> int:
+    try:
+        if video_duration < 3 * 60:  # Less than 3 minutes
+            return 10
+        elif video_duration < 10 * 60:  # Less than 10 minutes
+            return 20
+        else:  # 10 minutes or more
+            return 30
+    except Exception:
+        return DEFAULT_KEYFRAME_INTERVAL
 
 
 @app.get("/")
 async def root():
-    return {"message": "Video to Text Summarization", "status": "healthy"}
+    now = datetime.now(timezone.utc)
+    uptime_seconds = (now - START_TIME).total_seconds()
+
+    openai_configured = True
+    try:
+        if not client:
+            openai_configured = False
+    except Exception:
+        openai_configured = False
+
+    mongodb_status = {"ok": False}
+    summaries_count = None
+    try:
+        await mongodb_client.admin.command('ping')
+        mongodb_status["ok"] = True
+        summaries_count = await summaries_collection.count_documents({})
+    except Exception as e:
+        mongodb_status["details"] = str(e)
+
+    return {
+        "message": "Video Summarizer",
+        "status": "healthy",
+        "server_time": now.isoformat(),
+        "started_at": START_TIME.isoformat(),
+        "uptime_seconds": int(uptime_seconds),
+        "openai_configured": openai_configured,
+        "mongodb_status": mongodb_status.get("ok", False),
+        "summaries_count": int(summaries_count) if summaries_count is not None else None,
+        "keyframe_intervals": {
+            "less_than_3_min": 10,
+            "between_3_and_10_min": 20,
+            "10_min_or_more": 30,
+            "default": 30
+        },
+        "supported_formats": sorted(list(SUPPORTED_FORMATS)),
+        "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024)
+    }
 
 
 @app.get("/api/summaries")
@@ -462,7 +516,10 @@ async def get_summaries():
 
 
 @app.post("/api/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(
+    file: UploadFile = File(...),
+    prompt: Optional[str] = Form(None)
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -483,7 +540,9 @@ async def upload_video(file: UploadFile = File(...)):
 
         logger.info(f"Processing video: {file.filename}")
 
-        summary, transcript, visual_descriptions, frames_count = await processor.process_video(video_path, file.filename)
+        summary, transcript, visual_descriptions, frames_count, video_duration, keyframe_interval, prompt_used = await processor.process_video(
+            video_path, file.filename, prompt
+        )
 
         logger.info(f"Successfully processed video: {file.filename}")
 
@@ -494,17 +553,20 @@ async def upload_video(file: UploadFile = File(...)):
             "has_audio": transcript is not None,
             "has_visual": frames_count > 0,
             "frames_analyzed": frames_count,
-            "keyframe_interval": KEYFRAME_INTERVAL
+            "keyframe_interval": keyframe_interval,
+            "video_duration_seconds": video_duration,
+            "used_custom_prompt": bool(prompt and str(prompt).strip())
         }
 
         # Save to MongoDB
-        document_id = await save_summary_to_db(file.filename, summary, metadata)
+        document_id = await save_summary_to_db(file.filename, summary, prompt_used, metadata)
 
         response_data = {
             "success": True,
             "summary": summary,
             "document_id": document_id,
-            "metadata": metadata
+            "metadata": metadata,
+            "prompt": prompt_used
         }
 
         logger.info(f"Response data: {response_data}")
@@ -518,23 +580,6 @@ async def upload_video(file: UploadFile = File(...)):
             status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
         processor.cleanup()
-
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        if not request.message.strip():
-            raise HTTPException(
-                status_code=400, detail="Message cannot be empty")
-
-        response = await generate_chat_response(request.message.strip())
-        return ChatResponse(success=True, response=response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail="Failed to generate response")
 
 
 @app.post("/api/transcribe", response_model=TranscribeResponse)

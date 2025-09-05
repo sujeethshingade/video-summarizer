@@ -28,6 +28,7 @@ export interface SummaryDocument {
     _id: string
     filename: string
     summary_data: SummaryData
+    prompt_used?: string
     processed_at: string
     metadata?: {
         filename?: string
@@ -36,5 +37,7 @@ export interface SummaryDocument {
         has_visual?: boolean
         frames_analyzed?: number
         keyframe_interval?: number
+        video_duration_seconds?: number
+    used_custom_prompt?: boolean
     }
 }

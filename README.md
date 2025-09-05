@@ -1,171 +1,56 @@
-# Video Summarization
+# Video Summarizer
 
-An application that processes video files to analyze employee work sessions, providing structured summaries with task categorization, time estimation, and AI automation opportunity assessment.
+An application that processes video files to analyze employee work sessions and returns summaries and analytics.
 
-## Installation
+## How it works?
+
+1. Upload: user uploads a video via the frontend (drag-and-drop or file select). A `prompt` field may be provided.
+2. Processing: server validates the file, extracts audio (if present) and keyframes using `ffmpeg`/`ffprobe`.
+3. Keyframe selection: server chooses a keyframe interval based on video duration (e.g. 10s / 20s / 30s) and extracts frames at that rate.
+4. Analysis: audio is transcribed (OpenAI transcription models) and frames are analyzed via vision-capable models. A composed internal prompt (including audio/visual context) is sent to the model.
+5. Summary database: results are saved to MongoDB along with `prompt_used` and `metadata` to enable the summaries page to display the prompt and other details later.
+
+### Installation
 
 ```bash
-# Navigate to client directory
+# Navigate to client
 cd client
 
 # Install dependencies
 npm install
 
-# Start frontend server
+# Start frontend
 npm run dev
 
-# Frontend will start on http://localhost:3000
+# Frontend available at http://localhost:3000
 ```
 
 ```bash
-# Navigate to server directory
+# Navigate to server
 cd server
 
-# Create and activate virtual environment
+# Create & activate venv (macOS / Linux)
 python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
 source venv/bin/activate
 
-# Install Python dependencies
+# Install server deps
 pip install -r requirements.txt
 
-# Set up environment variables
+# Copy environment file and set credentials
 cp .env.example .env
+# Edit .env to set OPENAI_API_KEY, MONGODB_URL, MONGODB_DB_NAME, etc.
 
-# Merge WebM videos based on timestamps
+# (Optional) If you need to merge WebM fragments:
 python merge_webm.py
 
-# Start backend server
+# Start backend (the project contains a FastAPI app)
 python main.py
 
-# Server will start on http://localhost:8000
-# API documentation available at http://localhost:8000/docs
+# Backend available at http://localhost:8000 (API docs at /docs)
 ```
 
-## How It Works?
+Note: ensure `ffmpeg` and `ffprobe` are installed. On macOS, you can install via Homebrew:
 
-### Phase 1: Upload & Validation
-
-1. **File Upload**: User uploads video via drag-and-drop or file selection in chat interface
-2. **Format Validation**: Server validates file format against supported types
-3. **Size Check**: Ensures file size is within configured limits (default: 100MB)
-4. **Temporary Storage**: File is stored temporarily for processing
-
-### Phase 2: Media Extraction
-
-```python
-# Audio extraction using FFmpeg
-ffmpeg -i input_video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 output_audio.wav
-
-# Keyframe extraction (every 5 seconds)
-ffmpeg -i input_video.mp4 -vf "fps=1/5" -q:v 3 frame_%03d.jpg
+```bash
+brew install ffmpeg
 ```
-
-### Phase 3: Parallel Processing
-
-#### Audio Transcription with Whisper Models
-
-```python
-async def transcribe_audio(audio_path: str) -> str:
-    """
-    Transcribes audio using OpenAI Whisper Models
-    - Supports multiple languages
-    - Handles various audio qualities
-    - Returns timestamped transcription
-    """
-    with open(audio_path, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=audio_file,
-            response_format="text"
-        )
-    return transcript
-```
-
-#### Visual Analysis with GPT-4 Vision
-
-```python
-async def analyze_images(image_path: str, timestamp: int, timestamp_str: str = None) -> str:
-    """
-    Analyzes video frames using GPT-4 Vision
-    - Identifies subjects, objects, and scenes
-    - Extracts visible text and graphics
-    - Focuses on work activities and task identification
-    """
-    with open(image_path, "rb") as image_file:
-        base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-    
-    messages = [{
-        "role": "user",
-        "content": [
-            {
-                "type": "text", 
-                "text": f"Analyze this video frame at {timestamp_str} ({timestamp}s). Describe: 1) Main subjects/people and their actions, 2) Key objects and environment, 3) Text/graphics visible, 4) Overall scene context. Be specific and concise about what tasks or activities are being performed."
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-            }
-        ]
-    }]
-    
-    return await call_openai_api("gpt-4.1", messages, max_tokens=200)
-```
-
-### Phase 4: Video Analysis & Summary Generation
-
-```python
-async def generate_summary(transcript: str, visual_descriptions: List[str], filename: str, video_duration: float = 0.0) -> str:
-
-    prompt = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
-1. Summarize the key tasks the employee performed.
-2. Categorize each task into one of the following: 
-   - Repetitive
-   - Analytical
-   - Communication
-   - Decision-Making
-   - Knowledge Work
-3. Identify tools and systems used.
-4. Estimate time spent for each task based on the video duration and content analysis.
-5. Suggest whether the task has High, Medium, or Low potential for AI support.
-
-VIDEO FILE: {filename}
-VIDEO DURATION: {duration_str} (total duration)
-{audio_section}{visual_section}
-
-Provide output in valid JSON format with the following structure:
-{{
-  "summary": "Brief detailed summary of the work session within 5 lines.",
-  "tasks": [
-    {{
-      "task": "Description of the task",
-      "category": "One of: Repetitive, Analytical, Communication, Decision-Making, Knowledge Work",
-      "tools": ["Tool1", "Tool2", "Tool3"],
-      "timeEstimate": "Estimated duration based on video analysis",
-      "aiOpportunity": "High, Medium, or Low"
-    }}
-  ]
-}}"""
-
-    return await call_openai_api("gpt-4.1", messages, max_tokens=800, temperature=0.2)
-```
-
-### Configurable Options
-
-- **Max file size**: 1GB (adjustable via MAX_FILE_SIZE)
-- **Supported formats**: MP4, MOV, AVI, WMV, FLV, WebM, MKV
-- **Keyframe extraction**: Every 5 seconds (configurable via KEYFRAME_INTERVAL)
-- **Output format**: Structured JSON with fallback to plain text
-- **Audio handling**: Automatically detects and handles videos without audio tracks
-- **Visual handling**: Automatically detects and handles videos without visual content
-- **Content requirements**: Processes videos with audio-only, visual-only, or combined content
-- **Task analysis**: Specialized prompting for work session evaluation
-
-### References
-
-- [OpenAI GPT-4V System Card](https://openai.com/index/gpt-4v-system-card/)
-- [OpenAI Images & Vision API Documentation](https://platform.openai.com/docs/guides/images-vision)
