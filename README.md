@@ -49,6 +49,20 @@ python main.py
 # Backend available at http://localhost:8000 (API docs at /docs)
 ```
 
+```bash
+# Build both services
+docker compose build
+
+# Run both services
+docker compose up -d
+
+# Check logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+```
+
 Note: ensure `ffmpeg` and `ffprobe` are installed. On macOS, you can install via Homebrew:
 
 ```bash
