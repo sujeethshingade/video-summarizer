@@ -1,8 +1,8 @@
 services:
   server:
     build:
-      context: .
-      dockerfile: server/Dockerfile
+      context: ./server
+      dockerfile: Dockerfile
     container_name: video-summarizer-server
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -15,8 +15,8 @@ services:
 
   client:
     build:
-      context: .
-      dockerfile: client/Dockerfile
+      context: ./client
+      dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
     container_name: video-summarizer-client

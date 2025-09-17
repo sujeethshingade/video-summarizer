@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log*
+.yarn/cache
+.next/cache
+.env
+.env.*
+.git
+.gitignore
+.vscode
+**/*.md

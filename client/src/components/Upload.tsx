@@ -276,7 +276,6 @@ export function Upload() {
                 completed: 'bg-green-100 text-green-700',
                 error: 'bg-red-100 text-red-700'
               }
-              const statusBadge = statusMap[job.status] || 'bg-gray-100 text-gray-600'
               let icon: JSX.Element
               switch (job.status) {
                 case 'completed': icon = <CheckCircle2 className="w-5 h-5 text-green-600" />; break
@@ -293,9 +292,6 @@ export function Upload() {
                         <p className="font-medium text-gray-900 text-sm">{job.filename}</p>
                         {job.error && <p className="text-xs text-red-600 mt-1">{job.error}</p>}
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {job.status === 'completed' && job.summary && <span className="text-xs text-green-600 font-medium">✓</span>}
                     </div>
                   </div>
                   {job.status === 'completed' && job.summary && (
