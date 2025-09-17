@@ -1,14 +1,15 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from openai import OpenAI
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timezone
 import os
+import uuid
 import tempfile
 import subprocess
 import base64
@@ -40,18 +41,20 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
 SUPPORTED_FORMATS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm"}
-# Default keyframe interval (used as fallback)
-DEFAULT_KEYFRAME_INTERVAL = 30  # seconds
+DEFAULT_KEYFRAME_INTERVAL = 30  # seconds (used as fallback)
 
-app = FastAPI(title="Video to Text Summarization", version="1.0.0")
+app = FastAPI(title="Video Summarizer", version="1.0.0")
 
 mongodb_client = AsyncIOMotorClient(MONGODB_URL)
 db = mongodb_client[MONGODB_DB_NAME]
 summaries_collection = db.summaries
 
+jobs: Dict[str, Dict] = {}
+job_queue: asyncio.Queue = asyncio.Queue()
+queue_worker_started = False
+
 try:
     client = OpenAI(api_key=OPENAI_API_KEY)
-    logger.info("OpenAI client initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize OpenAI client: {e}")
     raise RuntimeError("Could not initialize OpenAI client")
@@ -81,7 +84,6 @@ async def save_summary_to_db(filename: str, summary_json: str, prompt_used: str,
     try:
         summary_data = json.loads(summary_json)
         
-        # Create the document
         document = {
             "filename": filename,
             "summary_data": summary_data,
@@ -90,7 +92,6 @@ async def save_summary_to_db(filename: str, summary_json: str, prompt_used: str,
             "metadata": metadata or {}
         }
         
-        # Insert into MongoDB
         result = await summaries_collection.insert_one(document)
         logger.info(f"Saved summary to database with ID: {result.inserted_id}")
         return str(result.inserted_id)
@@ -105,7 +106,6 @@ async def get_all_summaries() -> List[dict]:
         cursor = summaries_collection.find().sort("processed_at", -1)
         summaries = []
         async for document in cursor:
-            # Convert ObjectId to string for JSON serialization
             document["_id"] = str(document["_id"])
             summaries.append(document)
         return summaries
@@ -158,7 +158,6 @@ class VideoProcessor:
                 f"Could not probe audio streams in video: {os.path.basename(video_path)}")
             return None
 
-        # Proceed with audio extraction if audio stream exists
         audio_path = os.path.join(self.temp_dir, "audio.wav")
         cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec",
                "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", audio_path]
@@ -208,7 +207,6 @@ class VideoProcessor:
         return sorted([os.path.join(frames_dir, f) for f in frame_files])
 
     async def process_video(self, video_path: str, filename: str, custom_prompt: Optional[str] = None) -> Tuple[str, Optional[str], List[str], int, float, int, str]:
-        # Get video duration first
         video_duration = await self.get_video_duration(video_path)
 
         # Choose dynamic keyframe interval based on duration
@@ -259,7 +257,6 @@ class VideoProcessor:
         async def analyze_frame(frame_path: str, index: int):
             async with semaphore:
                 timestamp = index * keyframe_interval
-                # Format timestamp as minutes:seconds for better readability
                 minutes = timestamp // 60
                 seconds = timestamp % 60
                 timestamp_str = f"{int(minutes):02d}:{int(seconds):02d}"
@@ -464,42 +461,30 @@ def choose_keyframe_interval(video_duration: float) -> int:
 
 @app.get("/")
 async def root():
-    now = datetime.now(timezone.utc)
-    uptime_seconds = (now - START_TIME).total_seconds()
-
-    openai_configured = True
-    try:
-        if not client:
-            openai_configured = False
-    except Exception:
-        openai_configured = False
-
-    mongodb_status = {"ok": False}
-    summaries_count = None
-    try:
-        await mongodb_client.admin.command('ping')
-        mongodb_status["ok"] = True
-        summaries_count = await summaries_collection.count_documents({})
-    except Exception as e:
-        mongodb_status["details"] = str(e)
-
     return {
         "message": "Video Summarizer",
-        "status": "healthy",
-        "server_time": now.isoformat(),
-        "started_at": START_TIME.isoformat(),
-        "uptime_seconds": int(uptime_seconds),
-        "openai_configured": openai_configured,
-        "mongodb_status": mongodb_status.get("ok", False),
-        "summaries_count": int(summaries_count) if summaries_count is not None else None,
-        "keyframe_intervals": {
-            "less_than_3_min": 10,
-            "between_3_and_10_min": 20,
-            "10_min_or_more": 30,
-            "default": 30
-        },
-        "supported_formats": sorted(list(SUPPORTED_FORMATS)),
-        "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024)
+        "status": "healthy"
+    }
+
+
+@app.get("/health")
+async def health():
+    now = datetime.now(timezone.utc)
+    uptime_seconds = int((now - START_TIME).total_seconds())
+    openai_ok = True if client else False
+    mongo_ok = False
+    try:
+        await mongodb_client.admin.command('ping')
+        mongo_ok = True
+    except Exception:
+        mongo_ok = False
+
+    return {
+        "status": "ok" if (openai_ok and mongo_ok) else "degraded",
+        "uptime_seconds": uptime_seconds,
+        "openai": openai_ok,
+        "mongodb": mongo_ok,
+        "timestamp": now.isoformat()
     }
 
 
@@ -546,7 +531,6 @@ async def upload_video(
 
         logger.info(f"Successfully processed video: {file.filename}")
 
-        # Prepare metadata for database
         metadata = {
             "filename": file.filename,
             "transcript_length": len(transcript) if transcript else 0,
@@ -558,7 +542,6 @@ async def upload_video(
             "used_custom_prompt": bool(prompt and str(prompt).strip())
         }
 
-        # Save to MongoDB
         document_id = await save_summary_to_db(file.filename, summary, prompt_used, metadata)
 
         response_data = {
@@ -580,6 +563,128 @@ async def upload_video(
             status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
         processor.cleanup()
+
+
+async def process_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return
+    if job.get("status") != "queued":
+        return
+    job["status"] = "processing"
+    file_obj: UploadFile = job["file"]
+    prompt = job.get("prompt")
+    processor = VideoProcessor()
+    try:
+        file_extension = Path(file_obj.filename).suffix.lower()
+        video_path = os.path.join(processor.temp_dir, f"video{file_extension}")
+        with open(video_path, 'wb') as f:
+            f.write(job["file_bytes"])  
+
+        summary, transcript, visual_descriptions, frames_count, video_duration, keyframe_interval, prompt_used = await processor.process_video(
+            video_path, file_obj.filename, prompt
+        )
+
+        metadata = {
+            "filename": file_obj.filename,
+            "transcript_length": len(transcript) if transcript else 0,
+            "has_audio": transcript is not None,
+            "has_visual": frames_count > 0,
+            "frames_analyzed": frames_count,
+            "keyframe_interval": keyframe_interval,
+            "video_duration_seconds": video_duration,
+            "used_custom_prompt": bool(prompt and str(prompt).strip())
+        }
+
+        document_id = await save_summary_to_db(file_obj.filename, summary, prompt_used, metadata)
+
+        job.update({
+            "status": "completed",
+            "summary": summary,
+            "metadata": metadata,
+            "prompt_used": prompt_used,
+            "document_id": document_id
+        })
+    except Exception as e:
+        job.update({
+            "status": "error",
+            "error": str(e)
+        })
+    finally:
+        processor.cleanup()
+
+
+async def queue_worker():
+    global queue_worker_started
+    if queue_worker_started:
+        return
+    queue_worker_started = True
+    while True:
+        job_id = await job_queue.get()
+        try:
+            await process_job(job_id)
+        except Exception as e:
+            if job_id in jobs:
+                jobs[job_id].update({"status": "error", "error": str(e)})
+        finally:
+            job_queue.task_done()
+
+
+@app.post("/api/upload-multiple")
+async def upload_multiple_videos(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    prompt: Optional[str] = Form(None)
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    created_jobs = []
+    for f in files:
+        if not f.filename:
+            continue
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_FORMATS:
+            continue  
+        file_bytes = await f.read()
+        if len(file_bytes) > MAX_FILE_SIZE:
+            continue
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {
+            "id": job_id,
+            "filename": f.filename,
+            "status": "queued",
+            "prompt": prompt,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "file": f,
+            "file_bytes": file_bytes
+        }
+        await job_queue.put(job_id)
+        created_jobs.append(job_id)
+
+    background_tasks.add_task(queue_worker)
+
+    if not created_jobs:
+        raise HTTPException(status_code=400, detail="No valid files queued for processing")
+
+    return {"success": True, "job_ids": created_jobs}
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    return {"jobs": [
+        {k: v for k, v in job.items() if k in {"id", "filename", "status", "error", "document_id"}}
+        for job in jobs.values()
+    ]}
+
+
+@app.get("/api/job/{job_id}")
+async def get_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    sanitized = {k: v for k, v in job.items() if k not in {"file", "file_bytes"}}
+    return sanitized
 
 
 @app.post("/api/transcribe", response_model=TranscribeResponse)

@@ -41,3 +41,14 @@ export interface SummaryDocument {
     used_custom_prompt?: boolean
     }
 }
+
+export interface JobStatus {
+    id: string
+    filename: string
+    status: 'queued' | 'processing' | 'completed' | 'error'
+    error?: string
+    document_id?: string
+    summary?: string
+    metadata?: any
+    prompt_used?: string
+}

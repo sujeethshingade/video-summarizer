@@ -1,18 +1,21 @@
 "use client"
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Summary } from '@/components/Summary'
-import { Upload as UploadIcon, X, FileVideo, AlertCircle, Loader2 } from 'lucide-react'
+import { Upload as UploadIcon, FileVideo, Loader2, CheckCircle2, Clock, AlertCircle } from 'lucide-react'
+import { JobStatus } from '@/lib/types'
 
 export function Upload() {
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [customPrompt, setCustomPrompt] = useState('')
   const [showDefaultPrompt, setShowDefaultPrompt] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
-  const [result, setResult] = useState<{ summary: string; prompt: string; metadata?: any } | null>(null)
+  const [jobs, setJobs] = useState<JobStatus[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
+  const [startedProcessing, setStartedProcessing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || (
     process.env.NODE_ENV === 'production'
@@ -27,22 +30,24 @@ export function Upload() {
 4. Estimate time spent for each task based on the video duration and content analysis.
 5. Suggest whether the task has High, Medium, or Low potential for AI support.`
 
-  const onSelectFile = useCallback((f: File | null) => {
-    setFile(f)
-    setResult(null)
-  }, [])
+  const onSelectFiles = useCallback((list: File[]) => {
+    setFiles(prev => {
+      if (!prev.length) return list
+      const existingKeys = new Set(prev.map(f => f.name + ':' + f.size))
+      const additions = list.filter(f => !existingKeys.has(f.name + ':' + f.size))
+      return [...prev, ...additions]
+    })
+    if (!startedProcessing) setJobs([])
+  }, [startedProcessing])
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
-    const files = e.dataTransfer.files
-    if (files.length > 0) {
-      const videoFile = files[0]
-      if (videoFile.type.startsWith('video/')) {
-        onSelectFile(videoFile)
-      }
+    const dtFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('video/'))
+    if (dtFiles.length) {
+      onSelectFiles(dtFiles)
     }
-  }, [onSelectFile])
+  }, [onSelectFiles])
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -55,39 +60,73 @@ export function Upload() {
   }, [])
 
   const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onSelectFile(e.target.files?.[0] || null)
+    const list = e.target.files ? Array.from(e.target.files) : []
+    const videos = list.filter(f => f.type.startsWith('video/'))
+    if (videos.length) onSelectFiles(videos)
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
+  const pollJobs = useCallback(async (jobIds: string[]) => {
+    if (!jobIds.length) return
+    try {
+      const updated: JobStatus[] = []
+      for (const id of jobIds) {
+        const res = await fetch(`${apiUrl}/api/job/${id}`)
+        if (res.ok) {
+          const data = await res.json()
+          updated.push(data as JobStatus)
+        }
+      }
+      setJobs(prev => {
+        const map = new Map(prev.map(j => [j.id, j]))
+        updated.forEach(u => map.set(u.id, { ...map.get(u.id), ...u }))
+        return Array.from(map.values())
+      })
+    } catch (e) {
+    }
+  }, [apiUrl])
+
+  useEffect(() => {
+    const active = jobs.filter(j => j.status === 'queued' || j.status === 'processing').length > 0
+    if (active) {
+      if (!pollingRef.current) {
+        pollingRef.current = setInterval(() => {
+          pollJobs(jobs.map(j => j.id))
+        }, 4000)
+      }
+    } else {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
+      }
+    }
+    return () => {
+      if (pollingRef.current && jobs.every(j => j.status === 'completed' || j.status === 'error')) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
+      }
+    }
+  }, [jobs, pollJobs])
+
   const onUpload = async () => {
-    if (!file) return
-    setIsUploading(true)
-    setResult(null)
+    if (!files.length) return
+  setIsUploading(true)
+  setStartedProcessing(true)
     try {
       const form = new FormData()
-      form.append('file', file)
+      files.forEach(f => form.append('files', f))
       if (customPrompt.trim()) form.append('prompt', customPrompt.trim())
-
-      const res = await fetch(`${apiUrl}/api/upload`, { method: 'POST', body: form })
-  const data = await res.json()
+      const res = await fetch(`${apiUrl}/api/upload-multiple`, { method: 'POST', body: form })
+      const data = await res.json()
       if (!res.ok) throw new Error(data?.detail || 'Upload failed')
-  setResult({ summary: data.summary, prompt: data.prompt, metadata: data.metadata })
-    } catch (err) {
-      setResult({
-        summary: 'Error processing video. Please try again.',
-        prompt: customPrompt || 'Default analysis prompt (server)',
-        metadata: null
-      })
+      const jobIds: string[] = data.job_ids || []
+      setJobs(jobIds.map(id => ({ id, filename: files[jobIds.indexOf(id)]?.name || 'unknown', status: 'queued' } as JobStatus)))
+      setTimeout(() => pollJobs(jobIds), 500)
+    } catch (e) {
+      setJobs(files.map((f, idx) => ({ id: `local-${idx}`, filename: f.name, status: 'error', error: 'Failed to start upload' })))
     } finally {
       setIsUploading(false)
     }
-  }
-
-  const reset = () => {
-    setFile(null)
-    setCustomPrompt('')
-    setResult(null)
-    setShowDefaultPrompt(false)
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const formatFileSize = (bytes: number) => {
@@ -110,7 +149,7 @@ export function Upload() {
             className={`relative border-2 border-dashed rounded-xl p-8 transition-all duration-200 ${
               isDragOver
                 ? 'border-blue-500 bg-blue-50'
-                : file
+                : files.length
                 ? 'border-green-500 bg-green-50'
                 : 'border-gray-300 hover:border-gray-400 bg-gray-50'
             }`}
@@ -121,34 +160,38 @@ export function Upload() {
             <input
               type="file"
               accept="video/*"
+              multiple
               ref={fileInputRef}
               onChange={onFileInputChange}
-              disabled={isUploading}
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              className={`absolute inset-0 w-full h-full opacity-0 cursor-pointer ${startedProcessing ? 'pointer-events-none' : ''}`}
             />
             
             <div className="text-center">
-              {file ? (
+              {files.length ? (
                 <div className="space-y-4">
-                  <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full">
-                    <FileVideo className="w-8 h-8 text-green-600" />
+                  <div className="flex flex-col items-center">
+                    <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full">
+                      <FileVideo className="w-8 h-8 text-green-600" />
+                    </div>
+                    <p className="text-lg font-semibold text-gray-900 mt-2">{files.length} file(s) selected</p>
                   </div>
-                  <div>
-                    <p className="text-md font-semibold text-gray-900">{file.name}</p>
-                    <p className="text-sm text-gray-500">{formatFileSize(file.size)}</p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        reset()
-                      }}
-                      className="mt-4 text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100"
-                    >
-                      <X className="w-4 h-4 mr-1" />
-                      Remove
-                    </Button>
-                  </div>
+                  <ul className="max-h-40 overflow-y-auto text-left text-sm space-y-1">
+                    {files.map((f, i) => (
+                      <li key={i} className="flex justify-between items-center px-2 py-1">
+                        <span className="truncate max-w-[700px]" title={f.name}>{f.name}</span>
+                        <span className="text-gray-500 ml-2 whitespace-nowrap">{formatFileSize(f.size)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                    {!startedProcessing && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
+                        className="text-blue-600 border-blue-200 hover:bg-blue-50"
+                      >Add More Videos</Button>
+                    )}
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -204,39 +247,65 @@ export function Upload() {
           <div className="mt-8 flex gap-4 justify-center">
             <Button
               onClick={onUpload}
-              disabled={!file || isUploading}
+              disabled={!files.length || startedProcessing}
               className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-semibold flex items-center gap-2 disabled:bg-gray-300"
             >
-              {isUploading ? (
+              {(isUploading || (startedProcessing && jobs.some(j => j.status === 'queued' || j.status === 'processing'))) ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  Analyzing Video...
+                  {isUploading ? 'Submitting...' : 'Processing...'}
                 </>
               ) : (
                 <>
-                  <FileVideo className="w-5 h-5" />
-                  Analyze Video
+                  Analyze {files.length > 1 ? 'Videos' : 'Video'}
                 </>
               )}
-            </Button>
-            
-            <Button
-              variant="outline"
-              onClick={reset}
-              disabled={isUploading}
-              className="px-8 py-3 rounded-lg font-semibold"
-            >
-              Reset
             </Button>
           </div>
         </div>
       </div>
 
-      {result && (
-        <div className="space-y-6">
-          <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Video Analysis Result</h3>
-            <Summary content={result.summary} />
+      {jobs.length > 0 && (
+        <div className="space-y-4">
+          <h3 className="text-lg font-semibold text-gray-900">Processing Status</h3>
+          <div className="space-y-3">
+            {jobs.map(job => {
+              const statusMap: Record<string,string> = {
+                queued: 'bg-gray-100 text-gray-700',
+                processing: 'bg-blue-100 text-blue-700',
+                completed: 'bg-green-100 text-green-700',
+                error: 'bg-red-100 text-red-700'
+              }
+              const statusBadge = statusMap[job.status] || 'bg-gray-100 text-gray-600'
+              let icon: JSX.Element
+              switch (job.status) {
+                case 'completed': icon = <CheckCircle2 className="w-5 h-5 text-green-600" />; break
+                case 'processing': icon = <Loader2 className="w-5 h-5 animate-spin text-blue-600" />; break
+                case 'error': icon = <AlertCircle className="w-5 h-5 text-red-600" />; break
+                default: icon = <Clock className="w-5 h-5 text-gray-500" />; break
+              }
+              return (
+                <div key={job.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {icon}
+                      <div>
+                        <p className="font-medium text-gray-900 text-sm">{job.filename}</p>
+                        {job.error && <p className="text-xs text-red-600 mt-1">{job.error}</p>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {job.status === 'completed' && job.summary && <span className="text-xs text-green-600 font-medium">✓</span>}
+                    </div>
+                  </div>
+                  {job.status === 'completed' && job.summary && (
+                    <div className="mt-3">
+                      <Summary content={job.summary} />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
