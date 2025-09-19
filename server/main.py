@@ -454,6 +454,11 @@ QUALITY CHECKS (strict):
 - StageSequenceID strictly increasing.
 - Sum(Duration_Min) ≈ {duration_str} (±5%) including Idle.
 - Use "Unknown" if unsure; never hallucinate.
+FORMATTING CONSTRAINTS (strict):
+- Do NOT use ellipses ("..." or "…") or truncated phrases in any field.
+- "ActivityDetail" must be 2–3 COMPLETE sentences (roughly 120–300 characters) with concrete actions; no trailing ellipses.
+- "Observation" must be 3–5 COMPLETE sentences (roughly 300–500 characters); no trailing ellipses.
+- Write full words (e.g., "across", not "acro").
 OUTPUT FORMAT:
 Return only valid JSON with this schema:
 {{
@@ -528,7 +533,7 @@ Return only JSON. Do not include explanations or text outside JSON.
                         "EndTime": "Unknown",
                         "Duration_Min": "0",
                         "ActivityName": "Unknown",
-                        "ActivityDetail": response_text[:500],
+                        "ActivityDetail": response_text,
                         "ProcessStage_Generic": "Unknown/Other",
                         "ToolsUsed": ["Unknown"],
                         "FileTypeHandled": "Other",
