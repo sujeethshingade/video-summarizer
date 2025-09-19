@@ -206,7 +206,12 @@ class VideoProcessor:
 
         return sorted([os.path.join(frames_dir, f) for f in frame_files])
 
-    async def process_video(self, video_path: str, filename: str, custom_prompt: Optional[str] = None) -> Tuple[str, Optional[str], List[str], int, float, int, str]:
+    async def process_video(self, video_path: str, filename: str, custom_prompt: Optional[str] = None,
+                            employee_id: Optional[str] = None,
+                            name: Optional[str] = None,
+                            team: Optional[str] = None,
+                            date: Optional[str] = None,
+                            video_link: Optional[str] = None) -> Tuple[str, Optional[str], List[str], int, float, int, str]:
         video_duration = await self.get_video_duration(video_path)
 
         # Choose dynamic keyframe interval based on duration
@@ -244,7 +249,8 @@ class VideoProcessor:
             )
 
         summary, prompt_used = await generate_summary(
-            transcript, visual_descriptions, filename, video_duration, custom_prompt
+            transcript, visual_descriptions, filename, video_duration, custom_prompt,
+            employee_id=employee_id, name=name, team=team, date=date, video_link=video_link
         )
         return summary, transcript, visual_descriptions, len(frame_paths), video_duration, keyframe_interval, prompt_used
 
@@ -341,7 +347,12 @@ async def generate_summary(
     visual_descriptions: List[str],
     filename: str,
     video_duration: float = 0.0,
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    name: Optional[str] = None,
+    team: Optional[str] = None,
+    date: Optional[str] = None,
+    video_link: Optional[str] = None
 ) -> Tuple[str, str]:
     try:
         has_audio = transcript is not None and str(transcript).strip()
@@ -350,76 +361,147 @@ async def generate_summary(
         audio_section = ""
         visual_section = ""
 
+        # Build transcript content; include visual notes inline to enrich context
+        transcript_content = ""
         if has_audio:
-            audio_section = f"""
-AUDIO TRANSCRIPT:
-{transcript}
-"""
+            transcript_content = str(transcript).strip()
         if has_visual:
             visual_content = "\n".join(visual_descriptions)
-            visual_section = f"""
-VISUAL ANALYSIS (timestamped):
-{visual_content}
-"""
+            if transcript_content:
+                transcript_content += "\n\n[Visual_Notes]\n" + visual_content
+            else:
+                transcript_content = "[Visual_Notes]\n" + visual_content
 
         content_description = (
             "video content with both audio and visual elements" if (has_audio and has_visual)
             else ("audio content from this video file" if has_audio else "visual content from this video file")
         )
 
-        duration_minutes = int(video_duration // 60)
-        duration_seconds = int(video_duration % 60)
-        duration_str = f"{duration_minutes}m {duration_seconds}s" if duration_minutes > 0 else f"{duration_seconds}s"
+        # Duration strings
+        total_seconds = int(video_duration) if video_duration and video_duration > 0 else 0
+        hh = total_seconds // 3600
+        mm = (total_seconds % 3600) // 60
+        ss = total_seconds % 60
+        duration_hms = f"{hh:02d}:{mm:02d}:{ss:02d}" if total_seconds > 0 else "Unknown"
+        duration_str = duration_hms
 
-        default_instruction = f"""You are an AI assistant analyzing employee work session transcripts. Analyze this {content_description} and your goal is to:
-1. Summarize the key tasks the employee performed.
-2. Categorize each task into one of the following: 
-   - Repetitive
-   - Analytical
-   - Communication
-   - Decision-Making
-   - Knowledge Work
-3. Identify tools and systems used.
-4. Estimate time spent for each task based on the video duration and content analysis.
-5. Suggest whether the task has High, Medium, or Low potential for AI support.
+        # Defaults for employee/session metadata if not provided
+        employee_id = (employee_id or "Unknown").strip() or "Unknown"
+        name = (name or "Unknown").strip() or "Unknown"
+        team = (team or "Unknown").strip() or "Unknown"
+        date = (date or datetime.now(timezone.utc).date().isoformat()).strip()
+        video_link = (video_link or "Unknown").strip() or "Unknown"
 
-VIDEO FILE: {filename}
-VIDEO DURATION: {duration_str} (total duration)
-{audio_section}{visual_section}
-
-IMPORTANT: When estimating time for tasks, consider that:
-- The total video duration is {duration_str}
-- Multiple tasks can occur simultaneously or sequentially within this timeframe
-- Individual task durations should be realistic relative to the total video length
-
-Provide output in valid JSON format with the following structure:
+        # New event-log prompt as requested
+        default_instruction = f"""
+Role: You are an AI analyst converting screen recordings of employee work sessions into a fine-grained, process-mining event log. Employees belong to different teams.
+INPUTS:
+- Video file: {filename}
+- Video preview link: {video_link}
+- Video duration: {duration_str}
+- Transcript: {transcript_content}
+- EmployeeID: {employee_id}
+- Name: {name}
+- Team: {team}
+- Date: {date}
+OBJECTIVES (must do all):
+1. Produce a chronological event log of what the employee did during this {duration_str} session, with multiple rows (one per detected event).
+2. Each row must capture:
+     - What happened (activities, tools, files, details).
+     - When it happened (real timestamps: StartTime, EndTime, Duration_Min).
+     - How it happened (rework, exceptions, switches, idle).
+     - So what (value vs waste, AI automation potential).
+3. Work unsupervised: infer activities and generic stages without relying on a fixed taxonomy. If unsure, label as "Unknown" and lower confidence.
+SEGMENTATION RULES:
+- Default block size: 2–10 minutes.
+- Split events when ANY of these occur:
+    * Active window/app change (Excel → PDF → Browser).
+    * File/document change (different workbook, new filename).
+    * Action mode change (typing → scrolling → copy/paste → refresh).
+    * Idle > 5 minutes (mark event as "Idle", IdleTime_Flag=Yes).
+- Merge micro-bursts <60s into adjacent event if same app/context; else keep as MicroTask_Flag=Yes.
+- Events must strictly follow chronological order.
+FIELDS TO POPULATE PER EVENT:
+- CaseID: Unique session ID (EmployeeID + Date).
+- EmployeeID: {employee_id}
+- Team: {team}
+- Date: {date}
+- StartTime / EndTime: Real timestamps within the video (or "Unknown" if ambiguous).
+- Duration_Min: Duration in minutes for this event.
+- StageSequenceID: Strictly increasing integer sequence for the session.
+- ActivityName: Standardized, short (e.g., "Variance Analysis", "Journal Draft", "Email Thread", "Spreadsheet Cleanup", "Idle", "Unknown").
+- ActivityDetail: 2–3 lines describing what exactly happened.
+- ProcessStage_Generic: One of {{Setup | Data Handling | Analysis | Exception/Break Handling | Adjustments/Entries | Validation/Checks | Reporting/Documentation | Communication | Navigation/Overhead | Idle | Unknown/Other}}.
+- ToolsUsed: List (Excel, Outlook, Browser, PDF viewer, File Explorer, Jira, etc.).
+- FileTypeHandled: Infer by extension/title/headers (Excel, PDF, Email, Report, Other).
+- CategoryType: {{Repetitive | Analytical | Knowledge Work | Communication | Decision-Making | Unknown}}.
+- ValueType: {{Value-Added | Required Non-Value | Pure Waste | Unknown}}.
+- Frequency: Count of similar occurrences in this session.
+- ReworkFlag: Yes if same file/step repeated shortly after.
+- ExceptionFlag: Yes if error/mismatch/break handled.
+- IdleTime_Flag: Yes if >5 min inactivity.
+- SwitchCount: Approx number of app/window/tab switches during event.
+- MicroTask_Flag: Yes if <60s and standalone.
+- ComplianceCheckFlag: Yes/No if compliance validation inferred.
+- ErrorRiskLevel: Low/Medium/High if applicable.
+- AI_OpportunityLevel: {{High | Medium | Low}}.
+- EliminationPotential: Yes if duplicative or non-value work.
+- RootCauseTag: If ExceptionFlag=Yes, choose one (Unsettled_Trade | Accrual_Mismatch | FX_Mismatch | Stale_Price | Data_Gap | Manual_Error | System_Error | Other/Unknown).
+- Observation: Note inefficiency or unusual pattern.
+- Confidence: Float 0–1. Drop ≤0.6 if uncertain.
+QUALITY CHECKS (strict):
+- No overlapping times; StartTime < EndTime.
+- StageSequenceID strictly increasing.
+- Sum(Duration_Min) ≈ {duration_str} (±5%) including Idle.
+- Use "Unknown" if unsure; never hallucinate.
+OUTPUT FORMAT:
+Return only valid JSON with this schema:
 {{
-  "summary": "Brief detailed summary of the work session within 5 lines.",
-  "tasks": [
-    {{
-      "task": "Description of the task",
-      "category": "One of: Repetitive, Analytical, Communication, Decision-Making, Knowledge Work",
-      "tools": ["e.g. \"Tool1\", \"Tool2\", \"Tool3\""],
-      "timeEstimate": "Estimated duration (e.g., '15s', '30s', '45s') based on video analysis or 'Unknown' if not applicable",
-      "aiOpportunity": "High, Medium, or Low"
-    }}
-  ]
+    "videoLink": "{video_link}",
+    "caseID": "{employee_id}_{date}",
+    "employeeID": "{employee_id}",
+    "name": "{name}",
+    "team": "{team}",
+    "date": "{date}",
+    "events": [
+        {{
+            "StageSequenceID": 1,
+            "StartTime": "HH:MM:SS" or "Unknown",
+            "EndTime": "HH:MM:SS" or "Unknown",
+            "Duration_Min": "float (minutes)",
+            "ActivityName": "string",
+            "ActivityDetail": "string",
+            "ProcessStage_Generic": "string",
+            "ToolsUsed": ["list"],
+            "FileTypeHandled": "string",
+            "CategoryType": "string",
+            "ValueType": "string",
+            "Frequency": "int",
+            "ReworkFlag": "Yes/No",
+            "ExceptionFlag": "Yes/No",
+            "IdleTime_Flag": "Yes/No",
+            "SwitchCount": "int",
+            "MicroTask_Flag": "Yes/No",
+            "ComplianceCheckFlag": "Yes/No",
+            "ErrorRiskLevel": "Low/Medium/High/Unknown",
+            "AI_OpportunityLevel": "High/Medium/Low",
+            "EliminationPotential": "Yes/No",
+            "RootCauseTag": "string",
+            "Observation": "string",
+            "Confidence": "float (0-1)"
+        }}
+    ]
 }}
-
-Return only valid JSON, no additional text or formatting."""
+Return only JSON. Do not include explanations or text outside JSON.
+"""
 
         user_prompt_display = custom_prompt.strip() if (custom_prompt and custom_prompt.strip()) else default_instruction
-        composed_prompt_for_model = (
-            (custom_prompt.strip() if custom_prompt else "")
-            + f"\n\nVIDEO FILE: {filename}\nVIDEO DURATION: {duration_str} (total duration)\n"
-            + audio_section
-            + visual_section
-        ) if (custom_prompt and custom_prompt.strip()) else default_instruction
+        composed_prompt_for_model = (custom_prompt.strip() if (custom_prompt and custom_prompt.strip()) else default_instruction)
 
         messages = [
             {
                 "role": "system",
-                "content": "You are an AI assistant analyzing employee work session transcripts. Your summaries help busy professionals quickly understand video content without watching. Adapt your analysis based on the available content - whether it's audio-only, visual-only, or combined content. Always return valid JSON format as requested. When estimating task durations, be realistic based on the total video duration and the context of the tasks observed. Use timestamps from visual analysis and audio cues to determine how long each task actually took."
+                "content": "You are an AI analyst producing a process-mining event log from a work session recording. Always follow the provided instructions strictly and return only valid JSON per the requested schema."
             },
             {"role": "user", "content": composed_prompt_for_model}
         ]
@@ -431,15 +513,42 @@ Return only valid JSON, no additional text or formatting."""
             return response_text, user_prompt_display
         except json.JSONDecodeError:
             logger.warning("OpenAI response was not valid JSON, creating fallback structure")
+            # If model didn't return JSON, wrap it into a minimal schema to keep downstream stable
             fallback_response = {
-                "summary": response_text,
-                "tasks": [{
-                    "task": "Unable to parse specific tasks from response",
-                    "category": "Knowledge Work",
-                    "tools": ["Unknown"],
-                    "timeEstimate": duration_str if video_duration > 0 else "Unknown",
-                    "aiOpportunity": "Medium"
-                }]
+                "videoLink": video_link,
+                "caseID": f"{employee_id}_{date}",
+                "employeeID": employee_id,
+                "name": name,
+                "team": team,
+                "date": date,
+                "events": [
+                    {
+                        "StageSequenceID": 1,
+                        "StartTime": "Unknown",
+                        "EndTime": "Unknown",
+                        "Duration_Min": "0",
+                        "ActivityName": "Unknown",
+                        "ActivityDetail": response_text[:500],
+                        "ProcessStage_Generic": "Unknown/Other",
+                        "ToolsUsed": ["Unknown"],
+                        "FileTypeHandled": "Other",
+                        "CategoryType": "Unknown",
+                        "ValueType": "Unknown",
+                        "Frequency": "1",
+                        "ReworkFlag": "No",
+                        "ExceptionFlag": "No",
+                        "IdleTime_Flag": "No",
+                        "SwitchCount": "0",
+                        "MicroTask_Flag": "No",
+                        "ComplianceCheckFlag": "No",
+                        "ErrorRiskLevel": "Unknown",
+                        "AI_OpportunityLevel": "Low",
+                        "EliminationPotential": "No",
+                        "RootCauseTag": "Other/Unknown",
+                        "Observation": "Model failed to return valid JSON; placeholder event created.",
+                        "Confidence": "0.5"
+                    }
+                ]
             }
             return json.dumps(fallback_response, indent=2), user_prompt_display
     except Exception as e:
@@ -503,7 +612,12 @@ async def get_summaries():
 @app.post("/api/upload")
 async def upload_video(
     file: UploadFile = File(...),
-    prompt: Optional[str] = Form(None)
+    prompt: Optional[str] = Form(None),
+    employee_id: Optional[str] = Form(None),
+    name: Optional[str] = Form(None),
+    team: Optional[str] = Form(None),
+    date: Optional[str] = Form(None),
+    video_link: Optional[str] = Form(None)
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -526,7 +640,8 @@ async def upload_video(
         logger.info(f"Processing video: {file.filename}")
 
         summary, transcript, visual_descriptions, frames_count, video_duration, keyframe_interval, prompt_used = await processor.process_video(
-            video_path, file.filename, prompt
+            video_path, file.filename, prompt,
+            employee_id=employee_id, name=name, team=team, date=date, video_link=video_link
         )
 
         logger.info(f"Successfully processed video: {file.filename}")
@@ -574,6 +689,11 @@ async def process_job(job_id: str):
     job["status"] = "processing"
     file_obj: UploadFile = job["file"]
     prompt = job.get("prompt")
+    employee_id = job.get("employee_id")
+    name = job.get("name")
+    team = job.get("team")
+    date = job.get("date")
+    video_link = job.get("video_link")
     processor = VideoProcessor()
     try:
         file_extension = Path(file_obj.filename).suffix.lower()
@@ -582,7 +702,8 @@ async def process_job(job_id: str):
             f.write(job["file_bytes"])  
 
         summary, transcript, visual_descriptions, frames_count, video_duration, keyframe_interval, prompt_used = await processor.process_video(
-            video_path, file_obj.filename, prompt
+            video_path, file_obj.filename, prompt,
+            employee_id=employee_id, name=name, team=team, date=date, video_link=video_link
         )
 
         metadata = {
@@ -634,7 +755,12 @@ async def queue_worker():
 async def upload_multiple_videos(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
-    prompt: Optional[str] = Form(None)
+    prompt: Optional[str] = Form(None),
+    employee_id: Optional[str] = Form(None),
+    name: Optional[str] = Form(None),
+    team: Optional[str] = Form(None),
+    date: Optional[str] = Form(None),
+    video_link: Optional[str] = Form(None)
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -657,7 +783,12 @@ async def upload_multiple_videos(
             "prompt": prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "file": f,
-            "file_bytes": file_bytes
+            "file_bytes": file_bytes,
+            "employee_id": employee_id,
+            "name": name,
+            "team": team,
+            "date": date,
+            "video_link": video_link
         }
         await job_queue.put(job_id)
         created_jobs.append(job_id)
